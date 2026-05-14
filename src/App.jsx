@@ -57,11 +57,18 @@ function isClosing(s) { return s.start_time >= '18:00:00' }
 // Mid shift: daytime, not opening, not closing
 function isMid(s) { return !isOpening(s) && !isClosing(s) }
 
+function localDateStr(d) {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
 function getWeekMonday(dateStr) {
   const d = new Date(dateStr)
   const day = d.getDay()
   d.setDate(d.getDate() - (day === 0 ? 6 : day - 1))
-  return d.toISOString().split('T')[0]
+  return localDateStr(d)
 }
 
 function runScheduleAlgorithm(availabilities, weekDates) {
@@ -228,13 +235,12 @@ export default function App() {
       const d = new Date()
       const day = d.getDay()
       d.setDate(d.getDate() - (day === 0 ? 6 : day - 1))
-      d.setHours(0, 0, 0, 0)
       return d
     })()
     return Array.from({ length: 7 }, (_, i) => {
       const d = new Date(base)
-      d.setDate(base.getDate() + i)
-      return d.toISOString().split('T')[0]
+      d.setDate(d.getDate() + i)
+      return localDateStr(d)
     })
   }
 
