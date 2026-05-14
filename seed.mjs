@@ -16,7 +16,7 @@ const SUN = '2026-05-24'
 // Shift templates
 const OPEN   = { s: '05:00:00', e: '10:00:00' }  // Opening — max 1/day, ends before mid starts
 const MID    = { s: '10:00:00', e: '18:00:00' }  // Mid
-const MID2   = { s: '11:00:00', e: '19:00:00' }  // Mid (later start)
+const MID2   = { s: '11:00:00', e: '18:00:00' }  // Mid (later start, must end by 6pm)
 const CLOSE  = { s: '18:00:00', e: '01:00:00' }  // Closing — min 2/day
 const CLOSE2 = { s: '19:00:00', e: '01:00:00' }  // Closing (later start)
 
