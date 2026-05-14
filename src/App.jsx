@@ -6,7 +6,7 @@ import { supabase } from './lib/supabase'
 import NamePrompt from './components/NamePrompt'
 import ShiftForm from './components/ShiftForm'
 import ManagerAccess from './components/ManagerAccess'
-import * as XLSX from 'xlsx'
+import ExcelJS from 'exceljs'
 
 const PALETTE = [
   { bg: '#B5D4F4', text: '#0C447C' },
@@ -53,6 +53,9 @@ function isOpening(s) { return s.start_time < '08:00:00' }
 
 // Closing shift: starts at 6pm or later (e.g. 6/7pm–1am)
 function isClosing(s) { return s.start_time >= '18:00:00' }
+
+// Mid shift: daytime, not opening, not closing
+function isMid(s) { return !isOpening(s) && !isClosing(s) }
 
 function getWeekMonday(dateStr) {
   const d = new Date(dateStr)
@@ -118,6 +121,17 @@ function runScheduleAlgorithm(availabilities, weekDates) {
       if (candidates.length === 0) break
       assign(pickFairest(candidates))
       closerCount++
+    }
+  })
+
+  // Phase 2b: Assign at least 2 mid shifts per day
+  weekDates.forEach(date => {
+    let midCount = assigned.filter(a => a.date === date && isMid(a)).length
+    while (midCount < 2) {
+      const candidates = availabilities.filter(a => a.date === date && isMid(a) && canAssign(a))
+      if (candidates.length === 0) break
+      assign(pickFairest(candidates))
+      midCount++
     }
   })
 
@@ -311,7 +325,7 @@ export default function App() {
     setShowShiftForm(true)
   }
 
-  const handleExport = () => {
+  const handleExport = async () => {
     if (!isManager) return
 
     const days = getWeekDates()
@@ -327,6 +341,8 @@ export default function App() {
       return (e - s) / 60
     }
 
+    const toArgb = hex => 'FF' + hex.replace('#', '')
+
     const scheduledShifts = shifts.filter(s => s.status === 'scheduled' && days.includes(s.date))
     const employees = [...new Set(scheduledShifts.map(s => s.employee_name))].sort()
 
@@ -335,60 +351,131 @@ export default function App() {
       return
     }
 
-    const row0 = ['']
-    const row1 = ['']
-    const row2 = ['Employee']
-    dayObjs.forEach(d => {
-      row0.push(d.label, '', '', '')
-      row1.push(d.display, '', '', '')
-      row2.push('Start', 'End', 'Break', 'Hours')
-    })
-    row0.push('T.WK HRS')
-    row1.push('')
-    row2.push('')
+    const wb = new ExcelJS.Workbook()
+    const ws = wb.addWorksheet('Schedule')
 
-    const dataRows = employees.map(emp => {
-      const row = [emp]
+    // Column widths: name | 7 days x 4 cols | total
+    ws.columns = [
+      { width: 28 },
+      ...Array(7).fill(null).flatMap(() => [{ width: 8 }, { width: 8 }, { width: 8 }, { width: 8 }]),
+      { width: 11 },
+    ]
+
+    const headerFill  = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } })
+    const centerAlign = { horizontal: 'center', vertical: 'middle' }
+    const DARK = 'FF1A1A1A'
+    const DGREY = 'FF444444'
+    const LGREY = 'FFD0D0D0'
+
+    // Row 1 — day name headers
+    const r1 = ws.addRow(['', ...dayObjs.flatMap(d => [d.label, '', '', '']), 'T.WK HRS'])
+    r1.height = 18
+    r1.eachCell(cell => {
+      cell.fill = headerFill(DARK)
+      cell.font = { color: { argb: 'FFFFFFFF' }, bold: true, size: 11 }
+      cell.alignment = centerAlign
+    })
+    dayObjs.forEach((_, i) => ws.mergeCells(1, 2 + i * 4, 1, 5 + i * 4))
+
+    // Row 2 — dates
+    const r2 = ws.addRow(['', ...dayObjs.flatMap(d => [d.display, '', '', '']), ''])
+    r2.height = 15
+    r2.eachCell(cell => {
+      cell.fill = headerFill(DGREY)
+      cell.font = { color: { argb: 'FFFFFFFF' }, size: 10 }
+      cell.alignment = centerAlign
+    })
+    dayObjs.forEach((_, i) => ws.mergeCells(2, 2 + i * 4, 2, 5 + i * 4))
+
+    // Row 3 — sub-headers
+    const r3 = ws.addRow(['Employee', ...dayObjs.flatMap(() => ['Start', 'End', 'Break', 'Hours']), ''])
+    r3.height = 14
+    r3.eachCell(cell => {
+      cell.fill = headerFill('FF888888')
+      cell.font = { color: { argb: 'FFFFFFFF' }, bold: true, size: 9 }
+      cell.alignment = centerAlign
+    })
+
+    // Employee rows
+    employees.forEach(emp => {
+      const color = getColor(emp)
+      const bgArgb   = toArgb(color.bg)
+      const textArgb = toArgb(color.text)
+      const empFill  = headerFill(bgArgb)
+      const empFont  = { color: { argb: textArgb }, size: 10 }
+
       let total = 0
+      const rowData = [emp]
       dayObjs.forEach(d => {
         const shift = scheduledShifts.find(s => s.employee_name === emp && s.date === d.iso)
         if (shift) {
           const hrs = calcHours(shift.start_time, shift.end_time)
           total += hrs
-          row.push(shift.start_time.slice(0, 5), shift.end_time.slice(0, 5), '', hrs)
+          rowData.push(shift.start_time.slice(0, 5), shift.end_time.slice(0, 5), '', hrs)
         } else {
-          row.push('OFF', '', '', '')
+          rowData.push('OFF', '', '', '')
         }
       })
-      row.push(total > 0 ? total : '')
-      return row
+      rowData.push(total > 0 ? total : '')
+
+      const row = ws.addRow(rowData)
+      row.height = 16
+      row.eachCell((cell, colNum) => {
+        cell.alignment = centerAlign
+        cell.font = { size: 10 }
+
+        if (colNum === 1) {
+          // Employee name always colored
+          cell.fill = empFill
+          cell.font = { ...empFont, bold: true }
+          cell.alignment = { horizontal: 'left', vertical: 'middle' }
+        } else if (colNum <= 29) {
+          // Day cells — color only if working that day
+          const dayIdx = Math.floor((colNum - 2) / 4)
+          const d = dayObjs[dayIdx]
+          const shift = d && scheduledShifts.find(s => s.employee_name === emp && s.date === d.iso)
+          if (shift) {
+            cell.fill = empFill
+            cell.font = empFont
+          }
+        } else {
+          // Total hours cell — color if they worked
+          if (total > 0) {
+            cell.fill = empFill
+            cell.font = { ...empFont, bold: true }
+          }
+        }
+      })
     })
 
-    const totalsRow = ['AL DAILY HOURS']
+    // Totals row
     let grandTotal = 0
+    const totalsData = ['AL DAILY HOURS']
     dayObjs.forEach(d => {
       const hrs = scheduledShifts
         .filter(s => s.date === d.iso)
         .reduce((sum, s) => sum + calcHours(s.start_time, s.end_time), 0)
       grandTotal += hrs
-      totalsRow.push('', '', '', hrs || '')
+      totalsData.push('', '', '', hrs || '')
     })
-    totalsRow.push(grandTotal || '')
+    totalsData.push(grandTotal || '')
+    const totRow = ws.addRow(totalsData)
+    totRow.height = 16
+    totRow.eachCell(cell => {
+      cell.fill = headerFill(LGREY)
+      cell.font = { bold: true, size: 10, color: { argb: DARK } }
+      cell.alignment = centerAlign
+    })
 
-    const aoa = [row0, row1, row2, ...dataRows, totalsRow]
-    const ws = XLSX.utils.aoa_to_sheet(aoa)
-    ws['!merges'] = dayObjs.map((_, i) => ({
-      s: { r: 0, c: 1 + i * 4 },
-      e: { r: 0, c: 4 + i * 4 },
-    }))
-    ws['!cols'] = [
-      { wch: 28 },
-      ...Array(7).fill(null).flatMap(() => [{ wch: 7 }, { wch: 7 }, { wch: 7 }, { wch: 7 }]),
-      { wch: 10 },
-    ]
-    const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, 'Schedule')
-    XLSX.writeFile(wb, `schedule-${days[0]}.xlsx`)
+    // Download
+    const buffer = await wb.xlsx.writeBuffer()
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `schedule-${days[0]}.xlsx`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   const today = new Date().toISOString().split('T')[0]
