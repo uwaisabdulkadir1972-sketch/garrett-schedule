@@ -183,7 +183,7 @@ export default function App() {
   const [showManagerPin, setShowManagerPin] = useState(false)
   const [defaultDate, setDefaultDate] = useState('')
   const [toast, setToast] = useState('')
-  const [currentWeekStart, setCurrentWeekStart] = useState(null)
+  const [currentWeekStart, setCurrentWeekStart] = useState('')
   const [generating, setGenerating] = useState(false)
 
   const fetchShifts = useCallback(async () => {
@@ -231,15 +231,15 @@ export default function App() {
   }
 
   const getWeekDates = () => {
-    const base = currentWeekStart || (() => {
+    const startStr = currentWeekStart || (() => {
       const d = new Date()
       const day = d.getDay()
       d.setDate(d.getDate() - (day === 0 ? 6 : day - 1))
-      return d
+      return localDateStr(d)
     })()
+    const [y, mo, day] = startStr.split('-').map(Number)
     return Array.from({ length: 7 }, (_, i) => {
-      const d = new Date(base)
-      d.setDate(d.getDate() + i)
+      const d = new Date(y, mo - 1, day + i)
       return localDateStr(d)
     })
   }
@@ -296,9 +296,8 @@ export default function App() {
     // Cross-midnight shifts end on the next day
     let endDate = s.date
     if (s.end_time < s.start_time) {
-      const d = new Date(s.date)
-      d.setDate(d.getDate() + 1)
-      endDate = d.toISOString().split('T')[0]
+      const [ey, em, ed] = s.date.split('-').map(Number)
+      endDate = localDateStr(new Date(ey, em - 1, ed + 1))
     }
     return {
       id: s.id,
@@ -337,8 +336,8 @@ export default function App() {
     const days = getWeekDates()
     const DAY_LABELS = ['MON', 'TUES', 'WED', 'THU', 'FRI', 'SAT', 'SUN']
     const dayObjs = DAY_LABELS.map((label, i) => {
-      const d = new Date(days[i])
-      return { label, iso: days[i], display: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}` }
+      const [dy, dm, dd] = days[i].split('-').map(Number)
+      return { label, iso: days[i], display: `${dd}/${dm}/${dy}` }
     })
 
     const calcHours = (start, end) => {
@@ -411,7 +410,7 @@ export default function App() {
     XLSX.writeFile(wb, `schedule-${days[0]}.xlsx`)
   }
 
-  const today = new Date().toISOString().split('T')[0]
+  const today = localDateStr(new Date())
 
   return (
     <div className="app">
@@ -486,7 +485,7 @@ export default function App() {
           eventClick={handleEventClick}
           height="auto"
           nowIndicator={true}
-          datesSet={(info) => setCurrentWeekStart(new Date(info.start))}
+          datesSet={(info) => setCurrentWeekStart(info.startStr.split('T')[0])}
           eventContent={(arg) => {
             const shift = arg.event.extendedProps.shift
             const canEdit = isManager || (shift.status === 'available' && shift.created_by === myName)
