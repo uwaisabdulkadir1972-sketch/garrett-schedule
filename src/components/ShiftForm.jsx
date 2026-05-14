@@ -12,6 +12,7 @@ const TIME_OPTIONS = HOURS.map(hour => {
 
 export default function ShiftForm({ shift, defaultDate, myName, isManager, onClose, onSave, onToast }) {
   const isEditing = !!shift
+  const isScheduled = shift?.status === 'scheduled'
 
   const [employeeName, setEmployeeName] = useState(shift?.employee_name || myName || '')
   const [date, setDate] = useState(shift?.date || defaultDate)
@@ -44,6 +45,7 @@ export default function ShiftForm({ shift, defaultDate, myName, isManager, onClo
       start_time: startTime,
       end_time: endTime,
       created_by: shift?.created_by || myName,
+      status: shift?.status || 'available',
     }
 
     let result
@@ -85,7 +87,7 @@ export default function ShiftForm({ shift, defaultDate, myName, isManager, onClo
   return (
     <div className="overlay" onClick={e => e.target === e.currentTarget && onClose()}>
       <div className="modal">
-        <h2>{isEditing ? 'Edit shift' : 'Book a shift'}</h2>
+        <h2>{isEditing ? (isScheduled ? 'Edit confirmed shift' : 'Edit availability') : 'Add availability'}</h2>
 
         {error && <div className="error-msg">{error}</div>}
 
@@ -149,7 +151,7 @@ export default function ShiftForm({ shift, defaultDate, myName, isManager, onClo
             </button>
           )}
           <button className="btn-primary" onClick={handleSave} disabled={loading}>
-            {loading ? 'Saving…' : isEditing ? 'Save changes' : 'Add shift'}
+            {loading ? 'Saving…' : isEditing ? 'Save changes' : 'Submit'}
           </button>
         </div>
       </div>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import FullCalendar from '@fullcalendar/react'
 import timeGridPlugin from '@fullcalendar/timegrid'
 import interactionPlugin from '@fullcalendar/interaction'
@@ -8,7 +8,6 @@ import ShiftForm from './components/ShiftForm'
 import ManagerAccess from './components/ManagerAccess'
 import * as XLSX from 'xlsx'
 
-// Each person gets a consistent color based on their name
 const PALETTE = [
   { bg: '#B5D4F4', text: '#0C447C' },
   { bg: '#9FE1CB', text: '#085041' },
@@ -29,11 +28,69 @@ function getColor(name) {
 }
 
 function formatTime(timeStr) {
-  // timeStr comes from DB as "10:00:00" — convert to "10:00 am"
   const [h, m] = timeStr.split(':').map(Number)
   const period = h < 12 ? 'am' : 'pm'
   const displayH = h === 0 ? 12 : h > 12 ? h - 12 : h
   return `${displayH}:${String(m).padStart(2, '0')} ${period}`
+}
+
+function runScheduleAlgorithm(availabilities, weekDates) {
+  const scheduled = []
+  const dayCount = {}
+  const empDayCount = {}
+  const scheduledOnDay = {}
+
+  weekDates.forEach(d => {
+    dayCount[d] = 0
+    scheduledOnDay[d] = new Set()
+  })
+
+  const employees = [...new Set(availabilities.map(a => a.employee_name))]
+
+  // Fewer unique available days = higher priority (harder to schedule)
+  const empAvailDays = {}
+  employees.forEach(emp => {
+    empAvailDays[emp] = new Set(
+      availabilities.filter(a => a.employee_name === emp).map(a => a.date)
+    ).size
+  })
+
+  const sortedEmps = [...employees].sort((a, b) => empAvailDays[a] - empAvailDays[b])
+
+  // Phase 1: guarantee each employee at least 1 day
+  sortedEmps.forEach(emp => {
+    const avail = availabilities
+      .filter(a => a.employee_name === emp)
+      .sort((a, b) => (dayCount[a.date] || 0) - (dayCount[b.date] || 0))
+    if (avail.length === 0) return
+    const pick = avail[0]
+    scheduled.push(pick)
+    dayCount[pick.date]++
+    scheduledOnDay[pick.date].add(emp)
+    empDayCount[emp] = 1
+  })
+
+  // Phase 2: fill each day to at least 2 people
+  weekDates.forEach(date => {
+    while ((dayCount[date] || 0) < 2) {
+      const candidates = availabilities.filter(
+        a => a.date === date && !scheduledOnDay[date].has(a.employee_name)
+      )
+      if (candidates.length === 0) break
+      candidates.sort((a, b) =>
+        (empDayCount[a.employee_name] || 0) - (empDayCount[b.employee_name] || 0)
+      )
+      const minDays = empDayCount[candidates[0].employee_name] || 0
+      const tied = candidates.filter(c => (empDayCount[c.employee_name] || 0) === minDays)
+      const pick = tied[Math.floor(Math.random() * tied.length)]
+      scheduled.push(pick)
+      dayCount[pick.date]++
+      scheduledOnDay[pick.date].add(pick.employee_name)
+      empDayCount[pick.employee_name] = (empDayCount[pick.employee_name] || 0) + 1
+    }
+  })
+
+  return scheduled
 }
 
 export default function App() {
@@ -47,8 +104,8 @@ export default function App() {
   const [defaultDate, setDefaultDate] = useState('')
   const [toast, setToast] = useState('')
   const [currentWeekStart, setCurrentWeekStart] = useState(null)
+  const [generating, setGenerating] = useState(false)
 
-  // Load all shifts from Supabase
   const fetchShifts = useCallback(async () => {
     const { data, error } = await supabase
       .from('bookings')
@@ -59,7 +116,6 @@ export default function App() {
 
   useEffect(() => { fetchShifts() }, [fetchShifts])
 
-  // Real-time: update calendar instantly when anyone books/edits
   useEffect(() => {
     const channel = supabase
       .channel('bookings-live')
@@ -94,34 +150,89 @@ export default function App() {
     showToast('Exited manager mode')
   }
 
-  // Convert shifts to FullCalendar event format
-  const events = shifts.map(s => {
+  const getWeekDates = () => {
+    const base = currentWeekStart || (() => {
+      const d = new Date()
+      const day = d.getDay()
+      d.setDate(d.getDate() - (day === 0 ? 6 : day - 1))
+      d.setHours(0, 0, 0, 0)
+      return d
+    })()
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(base)
+      d.setDate(base.getDate() + i)
+      return d.toISOString().split('T')[0]
+    })
+  }
+
+  const handleGenerateSchedule = async () => {
+    if (!isManager || generating) return
+    const days = getWeekDates()
+    const weekAvail = shifts.filter(s => days.includes(s.date) && s.status === 'available')
+
+    if (weekAvail.length === 0) {
+      showToast('No availability submitted for this week')
+      return
+    }
+
+    if (!window.confirm('Generate schedule for this week? Existing confirmed shifts will be replaced.')) return
+
+    setGenerating(true)
+
+    await supabase.from('bookings').delete().in('date', days).eq('status', 'scheduled')
+
+    const toSchedule = runScheduleAlgorithm(weekAvail, days)
+    if (toSchedule.length > 0) {
+      await supabase.from('bookings').insert(
+        toSchedule.map(s => ({
+          employee_name: s.employee_name,
+          date: s.date,
+          start_time: s.start_time,
+          end_time: s.end_time,
+          created_by: s.created_by,
+          status: 'scheduled',
+        }))
+      )
+    }
+
+    await fetchShifts()
+    setGenerating(false)
+    showToast(`Schedule generated — ${toSchedule.length} shifts assigned`)
+  }
+
+  // Employees only see their own entries; managers see all
+  const visibleShifts = isManager
+    ? shifts
+    : shifts.filter(s => s.employee_name === myName || s.created_by === myName)
+
+  const events = visibleShifts.map(s => {
     const color = getColor(s.employee_name)
+    const isScheduled = s.status === 'scheduled'
     return {
       id: s.id,
       title: s.employee_name,
       start: `${s.date}T${s.start_time}`,
       end: `${s.date}T${s.end_time}`,
-      backgroundColor: color.bg,
+      backgroundColor: isScheduled ? color.bg : '#ffffff',
       borderColor: color.bg,
       textColor: color.text,
       extendedProps: { shift: s },
     }
   })
 
-  // Clicking a shift — only open editor if you own it or are manager
   const handleEventClick = ({ event }) => {
     const shift = event.extendedProps.shift
-    const canEdit = isManager || shift.created_by === myName
+    const canEdit = isManager || (shift.status === 'available' && shift.created_by === myName)
     if (canEdit) {
       setEditingShift(shift)
       setShowShiftForm(true)
+    } else if (shift.status === 'scheduled') {
+      showToast('Confirmed shifts can only be edited by the manager')
     } else {
-      showToast(`This shift belongs to ${shift.employee_name}`)
+      showToast(`This belongs to ${shift.employee_name}`)
     }
   }
 
-  // Clicking an empty slot pre-fills the date
   const handleDateSelect = (info) => {
     setDefaultDate(info.startStr.split('T')[0])
     setEditingShift(null)
@@ -131,58 +242,45 @@ export default function App() {
   const handleExport = () => {
     if (!isManager) return
 
-    // Use the calendar's current week start (Monday), falling back to this week
-    const weekStart = currentWeekStart || (() => {
-      const d = new Date()
-      const day = d.getDay()
-      d.setDate(d.getDate() - (day === 0 ? 6 : day - 1))
-      d.setHours(0, 0, 0, 0)
-      return d
-    })()
-
+    const days = getWeekDates()
     const DAY_LABELS = ['MON', 'TUES', 'WED', 'THU', 'FRI', 'SAT', 'SUN']
-    const days = DAY_LABELS.map((label, i) => {
-      const d = new Date(weekStart)
-      d.setDate(weekStart.getDate() + i)
-      return {
-        label,
-        iso: d.toISOString().split('T')[0],
-        display: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
-      }
+    const dayObjs = DAY_LABELS.map((label, i) => {
+      const d = new Date(days[i])
+      return { label, iso: days[i], display: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}` }
     })
 
-    const toMins = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m }
+    const toMins = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m }
     const calcHours = (start, end) => {
       let s = toMins(start), e = toMins(end)
-      if (e <= s) e += 24 * 60 // handles cross-midnight shifts
+      if (e <= s) e += 24 * 60
       return (e - s) / 60
     }
 
-    const weekDates = new Set(days.map(d => d.iso))
-    const weekShifts = shifts.filter(s => weekDates.has(s.date))
-    const employees = [...new Set(weekShifts.map(s => s.employee_name))].sort()
+    const scheduledShifts = shifts.filter(s => s.status === 'scheduled' && days.includes(s.date))
+    const employees = [...new Set(scheduledShifts.map(s => s.employee_name))].sort()
 
-    // Row 0: day name headers (merged across 4 cols each)
+    if (employees.length === 0) {
+      showToast('No confirmed schedule yet — generate one first')
+      return
+    }
+
     const row0 = ['']
-    days.forEach(d => row0.push(d.label, '', '', ''))
-    row0.push('T.WK HRS')
-
-    // Row 1: dates
     const row1 = ['']
-    days.forEach(d => row1.push(d.display, '', '', ''))
-    row1.push('')
-
-    // Row 2: column sub-headers
     const row2 = ['Employee']
-    days.forEach(() => row2.push('Start', 'End', 'Break', 'Hours'))
+    dayObjs.forEach(d => {
+      row0.push(d.label, '', '', '')
+      row1.push(d.display, '', '', '')
+      row2.push('Start', 'End', 'Break', 'Hours')
+    })
+    row0.push('T.WK HRS')
+    row1.push('')
     row2.push('')
 
-    // Employee rows
     const dataRows = employees.map(emp => {
       const row = [emp]
       let total = 0
-      days.forEach(d => {
-        const shift = weekShifts.find(s => s.employee_name === emp && s.date === d.iso)
+      dayObjs.forEach(d => {
+        const shift = scheduledShifts.find(s => s.employee_name === emp && s.date === d.iso)
         if (shift) {
           const hrs = calcHours(shift.start_time, shift.end_time)
           total += hrs
@@ -195,43 +293,37 @@ export default function App() {
       return row
     })
 
-    // Totals row
     const totalsRow = ['AL DAILY HOURS']
     let grandTotal = 0
-    days.forEach(d => {
-      const dayHours = weekShifts
+    dayObjs.forEach(d => {
+      const hrs = scheduledShifts
         .filter(s => s.date === d.iso)
         .reduce((sum, s) => sum + calcHours(s.start_time, s.end_time), 0)
-      grandTotal += dayHours
-      totalsRow.push('', '', '', dayHours || '')
+      grandTotal += hrs
+      totalsRow.push('', '', '', hrs || '')
     })
     totalsRow.push(grandTotal || '')
 
     const aoa = [row0, row1, row2, ...dataRows, totalsRow]
     const ws = XLSX.utils.aoa_to_sheet(aoa)
-
-    // Merge day name header cells
-    ws['!merges'] = days.map((_, i) => ({
+    ws['!merges'] = dayObjs.map((_, i) => ({
       s: { r: 0, c: 1 + i * 4 },
       e: { r: 0, c: 4 + i * 4 },
     }))
-
     ws['!cols'] = [
       { wch: 28 },
       ...Array(7).fill(null).flatMap(() => [{ wch: 7 }, { wch: 7 }, { wch: 7 }, { wch: 7 }]),
       { wch: 10 },
     ]
-
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Schedule')
-    XLSX.writeFile(wb, `schedule-${days[0].iso}.xlsx`)
+    XLSX.writeFile(wb, `schedule-${days[0]}.xlsx`)
   }
 
   const today = new Date().toISOString().split('T')[0]
 
   return (
     <div className="app">
-      {/* Modals */}
       {showNamePrompt && <NamePrompt onSave={handleNameSave} />}
       {showManagerPin && <ManagerAccess onResult={handleManagerUnlock} />}
       {showShiftForm && (
@@ -246,10 +338,8 @@ export default function App() {
         />
       )}
 
-      {/* Toast notification */}
       {toast && <div className="toast">{toast}</div>}
 
-      {/* Header */}
       <div className="header">
         <div className="header-left">
           <h1>🍿 Garrett Popcorn — schedule</h1>
@@ -261,6 +351,9 @@ export default function App() {
         <div className="header-actions">
           {isManager ? (
             <>
+              <button className="btn-outline" onClick={handleGenerateSchedule} disabled={generating}>
+                {generating ? 'Generating…' : '⚡ Generate Schedule'}
+              </button>
               <button className="btn-outline" onClick={handleExport}>
                 ↓ Export Excel
               </button>
@@ -277,12 +370,11 @@ export default function App() {
             className="btn-primary"
             onClick={() => { setDefaultDate(today); setEditingShift(null); setShowShiftForm(true) }}
           >
-            + Add shift
+            + Add availability
           </button>
         </div>
       </div>
 
-      {/* Calendar */}
       <div className="calendar-wrap">
         <FullCalendar
           plugins={[timeGridPlugin, interactionPlugin]}
@@ -306,7 +398,8 @@ export default function App() {
           datesSet={(info) => setCurrentWeekStart(new Date(info.start))}
           eventContent={(arg) => {
             const shift = arg.event.extendedProps.shift
-            const canEdit = isManager || shift.created_by === myName
+            const isScheduled = shift.status === 'scheduled'
+            const canEdit = isManager || (shift.status === 'available' && shift.created_by === myName)
             return (
               <div style={{ padding: '3px 5px', cursor: canEdit ? 'pointer' : 'default' }}>
                 <div style={{ fontWeight: 600, fontSize: '12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -315,21 +408,26 @@ export default function App() {
                 <div style={{ fontSize: '11px', opacity: 0.75, marginTop: '1px' }}>
                   {formatTime(shift.start_time)} – {formatTime(shift.end_time)}
                 </div>
-                {canEdit && (
-                  <div style={{ fontSize: '10px', opacity: 0.6, marginTop: '1px' }}>
-                    tap to edit
-                  </div>
-                )}
+                <div style={{ fontSize: '10px', opacity: 0.6, marginTop: '1px' }}>
+                  {isScheduled ? '✓ confirmed' : 'preference'}
+                </div>
               </div>
             )
           }}
         />
       </div>
 
-      {/* Legend */}
-      {shifts.length > 0 && (
+      {visibleShifts.length > 0 && (
         <div className="legend">
-          {[...new Set(shifts.map(s => s.employee_name))].map(name => {
+          <div className="legend-item">
+            <span className="legend-dot" style={{ background: '#ccc' }} />
+            <span style={{ color: '#888' }}>hollow = preference</span>
+          </div>
+          <div className="legend-item">
+            <span className="legend-dot" style={{ background: '#185FA5' }} />
+            <span style={{ color: '#888' }}>solid = confirmed</span>
+          </div>
+          {[...new Set(visibleShifts.map(s => s.employee_name))].map(name => {
             const color = getColor(name)
             return (
               <div key={name} className="legend-item">
