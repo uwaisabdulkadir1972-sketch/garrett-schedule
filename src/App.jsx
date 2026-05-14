@@ -273,11 +273,18 @@ export default function App() {
   const events = visibleShifts.map(s => {
     const color = getColor(s.employee_name)
     const isScheduled = s.status === 'scheduled'
+    // Cross-midnight shifts end on the next day
+    let endDate = s.date
+    if (s.end_time < s.start_time) {
+      const d = new Date(s.date)
+      d.setDate(d.getDate() + 1)
+      endDate = d.toISOString().split('T')[0]
+    }
     return {
       id: s.id,
       title: s.employee_name,
       start: `${s.date}T${s.start_time}`,
-      end: `${s.date}T${s.end_time}`,
+      end: `${endDate}T${s.end_time}`,
       backgroundColor: isScheduled ? color.bg : '#ffffff',
       borderColor: color.bg,
       textColor: color.text,
@@ -462,18 +469,16 @@ export default function App() {
           datesSet={(info) => setCurrentWeekStart(new Date(info.start))}
           eventContent={(arg) => {
             const shift = arg.event.extendedProps.shift
-            const isScheduled = shift.status === 'scheduled'
             const canEdit = isManager || (shift.status === 'available' && shift.created_by === myName)
+            const parts = shift.employee_name.split(' ')
+            const shortName = parts.length > 1 ? `${parts[0]} ${parts[1][0]}.` : parts[0]
             return (
-              <div style={{ padding: '3px 5px', cursor: canEdit ? 'pointer' : 'default' }}>
-                <div style={{ fontWeight: 600, fontSize: '12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {arg.event.title}
+              <div style={{ padding: '3px 6px', cursor: canEdit ? 'pointer' : 'default', height: '100%', boxSizing: 'border-box' }}>
+                <div style={{ fontWeight: 700, fontSize: '12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {shortName}
                 </div>
-                <div style={{ fontSize: '11px', opacity: 0.75, marginTop: '1px' }}>
+                <div style={{ fontSize: '11px', opacity: 0.8, marginTop: '2px', whiteSpace: 'nowrap' }}>
                   {formatTime(shift.start_time)} – {formatTime(shift.end_time)}
-                </div>
-                <div style={{ fontSize: '10px', opacity: 0.6, marginTop: '1px' }}>
-                  {isScheduled ? '✓ confirmed' : 'preference'}
                 </div>
               </div>
             )
