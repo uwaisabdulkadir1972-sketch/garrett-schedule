@@ -1,14 +1,13 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabase'
 
-// Time options from 7am to 11pm
-const TIME_OPTIONS = Array.from({ length: 17 }, (_, i) => {
-  const hour = i + 7
+// Time options from 5am to 1am (next day)
+const HOURS = [5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,0,1]
+const TIME_OPTIONS = HOURS.map(hour => {
   const value = `${String(hour).padStart(2, '0')}:00:00`
-  const h12 = hour === 12 ? 12 : hour > 12 ? hour - 12 : hour
+  const h12 = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour
   const period = hour < 12 ? 'am' : 'pm'
-  const label = `${h12}:00 ${period}`
-  return { label, value }
+  return { label: `${h12}:00 ${period}`, value }
 })
 
 export default function ShiftForm({ shift, defaultDate, myName, isManager, onClose, onSave, onToast }) {
@@ -28,7 +27,7 @@ export default function ShiftForm({ shift, defaultDate, myName, isManager, onClo
   const validate = () => {
     if (!employeeName.trim()) return 'Please enter a name'
     if (!date) return 'Please select a date'
-    if (startTime >= endTime) return 'End time must be after start time'
+    if (startTime === endTime) return 'Start and end time cannot be the same'
     return ''
   }
 
@@ -74,9 +73,14 @@ export default function ShiftForm({ shift, defaultDate, myName, isManager, onClo
     onClose()
   }
 
-  const hoursCount = startTime && endTime
-    ? Math.max(0, (parseInt(endTime) - parseInt(startTime)))
-    : 0
+  const hoursCount = (() => {
+    if (!startTime || !endTime || startTime === endTime) return 0
+    const [sh] = startTime.split(':').map(Number)
+    const [eh] = endTime.split(':').map(Number)
+    let diff = eh - sh
+    if (diff <= 0) diff += 24
+    return diff
+  })()
 
   return (
     <div className="overlay" onClick={e => e.target === e.currentTarget && onClose()}>

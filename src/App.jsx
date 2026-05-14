@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import FullCalendar from '@fullcalendar/react'
 import timeGridPlugin from '@fullcalendar/timegrid'
 import interactionPlugin from '@fullcalendar/interaction'
@@ -46,6 +46,7 @@ export default function App() {
   const [showManagerPin, setShowManagerPin] = useState(false)
   const [defaultDate, setDefaultDate] = useState('')
   const [toast, setToast] = useState('')
+  const [currentWeekStart, setCurrentWeekStart] = useState(null)
 
   // Load all shifts from Supabase
   const fetchShifts = useCallback(async () => {
@@ -129,25 +130,101 @@ export default function App() {
 
   const handleExport = () => {
     if (!isManager) return
-    const rows = shifts.map(s => {
-      const hours = (
-        (new Date(`2000-01-01T${s.end_time}`) - new Date(`2000-01-01T${s.start_time}`)) / 3600000
-      )
+
+    // Use the calendar's current week start (Monday), falling back to this week
+    const weekStart = currentWeekStart || (() => {
+      const d = new Date()
+      const day = d.getDay()
+      d.setDate(d.getDate() - (day === 0 ? 6 : day - 1))
+      d.setHours(0, 0, 0, 0)
+      return d
+    })()
+
+    const DAY_LABELS = ['MON', 'TUES', 'WED', 'THU', 'FRI', 'SAT', 'SUN']
+    const days = DAY_LABELS.map((label, i) => {
+      const d = new Date(weekStart)
+      d.setDate(weekStart.getDate() + i)
       return {
-        'Employee': s.employee_name,
-        'Date': s.date,
-        'Start': formatTime(s.start_time),
-        'End': formatTime(s.end_time),
-        'Hours': hours,
+        label,
+        iso: d.toISOString().split('T')[0],
+        display: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
       }
     })
-    rows.sort((a, b) => a.Date.localeCompare(b.Date) || a.Employee.localeCompare(b.Employee))
-    const ws = XLSX.utils.json_to_sheet(rows)
-    // Set column widths
-    ws['!cols'] = [{ wch: 20 }, { wch: 14 }, { wch: 10 }, { wch: 10 }, { wch: 8 }]
+
+    const toMins = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m }
+    const calcHours = (start, end) => {
+      let s = toMins(start), e = toMins(end)
+      if (e <= s) e += 24 * 60 // handles cross-midnight shifts
+      return (e - s) / 60
+    }
+
+    const weekDates = new Set(days.map(d => d.iso))
+    const weekShifts = shifts.filter(s => weekDates.has(s.date))
+    const employees = [...new Set(weekShifts.map(s => s.employee_name))].sort()
+
+    // Row 0: day name headers (merged across 4 cols each)
+    const row0 = ['']
+    days.forEach(d => row0.push(d.label, '', '', ''))
+    row0.push('T.WK HRS')
+
+    // Row 1: dates
+    const row1 = ['']
+    days.forEach(d => row1.push(d.display, '', '', ''))
+    row1.push('')
+
+    // Row 2: column sub-headers
+    const row2 = ['Employee']
+    days.forEach(() => row2.push('Start', 'End', 'Break', 'Hours'))
+    row2.push('')
+
+    // Employee rows
+    const dataRows = employees.map(emp => {
+      const row = [emp]
+      let total = 0
+      days.forEach(d => {
+        const shift = weekShifts.find(s => s.employee_name === emp && s.date === d.iso)
+        if (shift) {
+          const hrs = calcHours(shift.start_time, shift.end_time)
+          total += hrs
+          row.push(shift.start_time.slice(0, 5), shift.end_time.slice(0, 5), '', hrs)
+        } else {
+          row.push('OFF', '', '', '')
+        }
+      })
+      row.push(total > 0 ? total : '')
+      return row
+    })
+
+    // Totals row
+    const totalsRow = ['AL DAILY HOURS']
+    let grandTotal = 0
+    days.forEach(d => {
+      const dayHours = weekShifts
+        .filter(s => s.date === d.iso)
+        .reduce((sum, s) => sum + calcHours(s.start_time, s.end_time), 0)
+      grandTotal += dayHours
+      totalsRow.push('', '', '', dayHours || '')
+    })
+    totalsRow.push(grandTotal || '')
+
+    const aoa = [row0, row1, row2, ...dataRows, totalsRow]
+    const ws = XLSX.utils.aoa_to_sheet(aoa)
+
+    // Merge day name header cells
+    ws['!merges'] = days.map((_, i) => ({
+      s: { r: 0, c: 1 + i * 4 },
+      e: { r: 0, c: 4 + i * 4 },
+    }))
+
+    ws['!cols'] = [
+      { wch: 28 },
+      ...Array(7).fill(null).flatMap(() => [{ wch: 7 }, { wch: 7 }, { wch: 7 }, { wch: 7 }]),
+      { wch: 10 },
+    ]
+
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Schedule')
-    XLSX.writeFile(wb, `garrett-schedule-${new Date().toISOString().split('T')[0]}.xlsx`)
+    XLSX.writeFile(wb, `schedule-${days[0].iso}.xlsx`)
   }
 
   const today = new Date().toISOString().split('T')[0]
@@ -215,8 +292,9 @@ export default function App() {
             center: 'title',
             right: 'timeGridWeek,timeGridDay',
           }}
-          slotMinTime="07:00:00"
-          slotMaxTime="23:00:00"
+          firstDay={1}
+          slotMinTime="05:00:00"
+          slotMaxTime="02:00:00"
           slotDuration="01:00:00"
           allDaySlot={false}
           events={events}
@@ -225,6 +303,7 @@ export default function App() {
           eventClick={handleEventClick}
           height="auto"
           nowIndicator={true}
+          datesSet={(info) => setCurrentWeekStart(new Date(info.start))}
           eventContent={(arg) => {
             const shift = arg.event.extendedProps.shift
             const canEdit = isManager || shift.created_by === myName
