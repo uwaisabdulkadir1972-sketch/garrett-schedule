@@ -294,7 +294,7 @@ export default function App() {
           }}
           firstDay={1}
           slotMinTime="05:00:00"
-          slotMaxTime="02:00:00"
+          slotMaxTime="26:00:00"
           slotDuration="01:00:00"
           allDaySlot={false}
           events={events}
