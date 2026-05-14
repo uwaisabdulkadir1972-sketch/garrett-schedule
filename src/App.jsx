@@ -34,20 +34,40 @@ function formatTime(timeStr) {
   return `${displayH}:${String(m).padStart(2, '0')} ${period}`
 }
 
-function runScheduleAlgorithm(availabilities, weekDates) {
-  const scheduled = []
-  const dayCount = {}
-  const empDayCount = {}
-  const scheduledOnDay = {}
+// Treat times before 5am as next-day (for cross-midnight shifts)
+function toMins(timeStr) {
+  const [h, m] = timeStr.split(':').map(Number)
+  const mins = h * 60 + m
+  return h < 5 ? mins + 24 * 60 : mins
+}
 
-  weekDates.forEach(d => {
-    dayCount[d] = 0
-    scheduledOnDay[d] = new Set()
-  })
+function shiftsOverlap(a, b) {
+  if (a.date !== b.date) return false
+  const as = toMins(a.start_time), ae = toMins(a.end_time)
+  const bs = toMins(b.start_time), be = toMins(b.end_time)
+  return as < be && bs < ae
+}
+
+// Opening shift: starts before 8am (e.g. 5am–10/11am)
+function isOpening(s) { return s.start_time < '08:00:00' }
+
+// Closing shift: starts at 6pm or later (e.g. 6/7pm–1am)
+function isClosing(s) { return s.start_time >= '18:00:00' }
+
+function getWeekMonday(dateStr) {
+  const d = new Date(dateStr)
+  const day = d.getDay()
+  d.setDate(d.getDate() - (day === 0 ? 6 : day - 1))
+  return d.toISOString().split('T')[0]
+}
+
+function runScheduleAlgorithm(availabilities, weekDates) {
+  const assigned = []
+  const empDayCount = {}
 
   const employees = [...new Set(availabilities.map(a => a.employee_name))]
 
-  // Fewer unique available days = higher priority (harder to schedule)
+  // Fewer available days = higher priority
   const empAvailDays = {}
   employees.forEach(emp => {
     empAvailDays[emp] = new Set(
@@ -55,42 +75,81 @@ function runScheduleAlgorithm(availabilities, weekDates) {
     ).size
   })
 
-  const sortedEmps = [...employees].sort((a, b) => empAvailDays[a] - empAvailDays[b])
+  const alreadyAssignedOnDay = (emp, date) =>
+    assigned.some(a => a.employee_name === emp && a.date === date)
 
-  // Phase 1: guarantee each employee at least 1 day
-  sortedEmps.forEach(emp => {
-    const avail = availabilities
-      .filter(a => a.employee_name === emp)
-      .sort((a, b) => (dayCount[a.date] || 0) - (dayCount[b.date] || 0))
-    if (avail.length === 0) return
-    const pick = avail[0]
-    scheduled.push(pick)
-    dayCount[pick.date]++
-    scheduledOnDay[pick.date].add(emp)
-    empDayCount[emp] = 1
+  const canAssign = (candidate) => {
+    // One shift per person per day
+    if (alreadyAssignedOnDay(candidate.employee_name, candidate.date)) return false
+    // Max 1 opener per day
+    if (isOpening(candidate) && assigned.some(a => a.date === candidate.date && isOpening(a))) return false
+    // Max 2 overlapping at any time
+    if (assigned.filter(a => shiftsOverlap(a, candidate)).length >= 2) return false
+    return true
+  }
+
+  const assign = (shift) => {
+    assigned.push(shift)
+    empDayCount[shift.employee_name] = (empDayCount[shift.employee_name] || 0) + 1
+  }
+
+  const pickFairest = (candidates) => {
+    // Sort by fewest scheduled days first, then fewest available days (higher need), random tiebreak
+    candidates.sort((a, b) =>
+      (empDayCount[a.employee_name] || 0) - (empDayCount[b.employee_name] || 0) ||
+      (empAvailDays[a.employee_name] || 0) - (empAvailDays[b.employee_name] || 0)
+    )
+    const minDays = empDayCount[candidates[0].employee_name] || 0
+    const tied = candidates.filter(c => (empDayCount[c.employee_name] || 0) === minDays)
+    return tied[Math.floor(Math.random() * tied.length)]
+  }
+
+  // Phase 1: Assign 1 opener per day
+  weekDates.forEach(date => {
+    const candidates = availabilities.filter(a => a.date === date && isOpening(a) && canAssign(a))
+    if (candidates.length > 0) assign(pickFairest(candidates))
   })
 
-  // Phase 2: fill each day to at least 2 people
+  // Phase 2: Assign at least 2 closers per day
   weekDates.forEach(date => {
-    while ((dayCount[date] || 0) < 2) {
-      const candidates = availabilities.filter(
-        a => a.date === date && !scheduledOnDay[date].has(a.employee_name)
-      )
+    let closerCount = assigned.filter(a => a.date === date && isClosing(a)).length
+    while (closerCount < 2) {
+      const candidates = availabilities.filter(a => a.date === date && isClosing(a) && canAssign(a))
       if (candidates.length === 0) break
-      candidates.sort((a, b) =>
-        (empDayCount[a.employee_name] || 0) - (empDayCount[b.employee_name] || 0)
-      )
-      const minDays = empDayCount[candidates[0].employee_name] || 0
-      const tied = candidates.filter(c => (empDayCount[c.employee_name] || 0) === minDays)
-      const pick = tied[Math.floor(Math.random() * tied.length)]
-      scheduled.push(pick)
-      dayCount[pick.date]++
-      scheduledOnDay[pick.date].add(pick.employee_name)
-      empDayCount[pick.employee_name] = (empDayCount[pick.employee_name] || 0) + 1
+      assign(pickFairest(candidates))
+      closerCount++
     }
   })
 
-  return scheduled
+  // Phase 3: Guarantee every employee at least 1 day
+  const sortedEmps = [...employees].sort((a, b) => empAvailDays[a] - empAvailDays[b])
+  sortedEmps.forEach(emp => {
+    if (empDayCount[emp]) return
+    const candidates = availabilities.filter(a => a.employee_name === emp && canAssign(a))
+    if (candidates.length === 0) return
+    // Prefer under-staffed days
+    candidates.sort((a, b) =>
+      assigned.filter(x => x.date === a.date).length -
+      assigned.filter(x => x.date === b.date).length
+    )
+    assign(candidates[0])
+  })
+
+  // Phase 4: Fill non-opening hours to at least 2 people per day
+  weekDates.forEach(date => {
+    const nonOpeningAssigned = assigned.filter(a => a.date === date && !isOpening(a))
+    if (nonOpeningAssigned.length >= 2) return
+    const candidates = availabilities.filter(a => a.date === date && !isOpening(a) && canAssign(a))
+    candidates.sort((a, b) =>
+      (empDayCount[a.employee_name] || 0) - (empDayCount[b.employee_name] || 0)
+    )
+    for (const c of candidates) {
+      if (assigned.filter(a => a.date === date && !isOpening(a)).length >= 2) break
+      if (canAssign(c)) assign(c)
+    }
+  })
+
+  return assigned
 }
 
 export default function App() {
@@ -178,7 +237,6 @@ export default function App() {
     if (!window.confirm('Generate schedule for this week? Existing confirmed shifts will be replaced.')) return
 
     setGenerating(true)
-
     await supabase.from('bookings').delete().in('date', days).eq('status', 'scheduled')
 
     const toSchedule = runScheduleAlgorithm(weekAvail, days)
@@ -200,10 +258,17 @@ export default function App() {
     showToast(`Schedule generated — ${toSchedule.length} shifts assigned`)
   }
 
-  // Employees only see their own entries; managers see all
-  const visibleShifts = isManager
-    ? shifts
-    : shifts.filter(s => s.employee_name === myName || s.created_by === myName)
+  // Weeks that already have a confirmed schedule — hide availability for those weeks
+  const scheduledWeeks = new Set(
+    shifts.filter(s => s.status === 'scheduled').map(s => getWeekMonday(s.date))
+  )
+
+  const myShifts = shifts.filter(s => s.employee_name === myName || s.created_by === myName)
+
+  // Hide availability for any week that already has confirmed shifts
+  const visibleShifts = (isManager ? shifts : myShifts).filter(s =>
+    s.status === 'scheduled' || !scheduledWeeks.has(getWeekMonday(s.date))
+  )
 
   const events = visibleShifts.map(s => {
     const color = getColor(s.employee_name)
@@ -249,7 +314,6 @@ export default function App() {
       return { label, iso: days[i], display: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}` }
     })
 
-    const toMins = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m }
     const calcHours = (start, end) => {
       let s = toMins(start), e = toMins(end)
       if (e <= s) e += 24 * 60
@@ -420,7 +484,7 @@ export default function App() {
       {visibleShifts.length > 0 && (
         <div className="legend">
           <div className="legend-item">
-            <span className="legend-dot" style={{ background: '#ccc' }} />
+            <span className="legend-dot" style={{ background: '#e0e0e0', border: '1px solid #aaa' }} />
             <span style={{ color: '#888' }}>hollow = preference</span>
           </div>
           <div className="legend-item">
