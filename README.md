@@ -1,20 +1,37 @@
-<<<<<<< HEAD
-# React + Vite
+# Garrett Schedule
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A staff scheduling application for collecting availability, generating weekly shifts, and exporting a roster to Excel.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- Staff submit availability through a weekly calendar.
+- Managers generate a schedule from submitted availability and edit shifts.
+- The scheduling heuristic prioritises coverage and attempts to distribute shifts across staff, subject to availability and scheduling rules.
+- Supabase stores bookings and updates the calendar when changes occur.
+- Managers can export the weekly schedule and hours to an Excel file.
 
-## React Compiler
+The generator may leave coverage gaps when suitable availability is missing. Review the generated roster before use.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Stack
 
-## Expanding the ESLint configuration
+React, Vite, FullCalendar, Supabase and SheetJS.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
-=======
-# garrett-schedule
->>>>>>> 7d6d339c028cd78775add2e13b52f3195da8b293
+## Run locally
+
+Install dependencies and start the development server:
+
+```bash
+npm install
+npm run dev
+```
+
+The app expects a configured Supabase project and a `bookings` table. Set these values in a local `.env.local` file:
+
+```text
+VITE_SUPABASE_URL=your_supabase_url
+VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
+```
+
+The repository does not currently document the database schema or policies, so the configuration alone may not be sufficient to reproduce the application.
+
+Other commands: `npm run build`, `npm run lint`, and `npm run preview`.
